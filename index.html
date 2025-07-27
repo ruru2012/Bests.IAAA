@@ -1,0 +1,417 @@
+// server.js
+// Este arquivo contém TUDO: o servidor, as rotas da API e o frontend completo.
+// Para hospedar na Vercel, você pode precisar criar um arquivo vercel.json
+// e mover este código para uma pasta /api, mas para rodar no Replit ou localmente,
+// isto é tudo que você precisa.
+
+// 1. IMPORTAÇÕES
+const express = require('express');
+const axios = require('axios');
+const cors = require('cors');
+
+// 2. INICIALIZAÇÃO
+const app = express();
+const PORT = 3000;
+
+// 3. MIDDLEWARES
+app.use(cors());
+app.use(express.json());
+
+// =================================================================
+// API BACKEND - Nosso servidor que conversa com os servidores da SED
+// =================================================================
+
+// ROTA DE LOGIN
+app.post('/api/login', async (req, res) => {
+  const { ra, senha } = req.body;
+  if (!ra || !senha) return res.status(400).json({ error: 'RA e Senha são obrigatórios.' });
+
+  try {
+    const response = await axios.post('https://sedintegracoes.educacao.sp.gov.br/credenciais/api/LoginCompletoToken', 
+      { user: `${ra}SP`, senha },
+      { headers: { 'Ocp-Apim-Subscription-Key': '2b03c1db3884488795f79c37c069381a' } }
+    );
+    res.status(200).json(response.data);
+  } catch (error) {
+    res.status(error.response?.status || 500).json({ error: 'Falha no login', details: error.response?.data });
+  }
+});
+
+// ROTA PARA BUSCAR TURMAS
+app.post('/api/turmas', async (req, res) => {
+  const { token, codigoAluno, anoLetivo } = req.body;
+  if (!token || !codigoAluno || !anoLetivo) return res.status(400).json({ error: 'Faltam parâmetros para buscar turmas.' });
+
+  const url = `https://sedintegracoes.educacao.sp.gov.br/apihubintegracoes/api/v2/Turma/ListarTurmasPorAluno?codigoAluno=${codigoAluno}&anoLetivo=${anoLetivo}`;
+  
+  try {
+    const response = await axios.get(url, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Ocp-Apim-Subscription-Key': '5936fddda3484fe1aa4436df1bd76dab'
+      }
+    });
+    res.status(200).json(response.data);
+  } catch (error) {
+    res.status(error.response?.status || 500).json({ error: 'Falha ao buscar turmas', details: error.response?.data });
+  }
+});
+
+// ROTA EXPERIMENTAL PARA BUSCAR TAREFAS E REDAÇÕES
+app.post('/api/tarefas', async (req, res) => {
+    // Esta rota tenta acessar o servidor protegido pelo Cloudflare. PODE FALHAR.
+    const { token, turmas } = req.body; // Recebemos o token e a lista de turmas
+    if (!token || !turmas) return res.status(400).json({ error: 'Faltam parâmetros para buscar tarefas.' });
+
+    // Construímos os 'publication_target' a partir das turmas. É uma suposição de como a API funciona.
+    const publicationTargets = turmas.map(t => `ra${t.codigo}-l`).join('&publication_target=');
+    
+    // Tentamos buscar tarefas E redações (is_essay=true)
+    const url = `https://edusp-api.ip.tv/tms/task/todo?expired_only=false&limit=100&offset=0&filter_expired=true&is_exam=false&with_answer=true&is_essay=true&publication_target=${publicationTargets}`;
+
+    try {
+        // Precisamos de mais cabeçalhos para tentar passar pelo Cloudflare.
+        const response = await axios.get(url, {
+            headers: {
+                'Authorization': `Bearer ${token}`, // O token que conseguimos no login é usado aqui também
+                'x-api-key': '31276483-31d4-4999-924b-3d33680e1a35', // Chave encontrada em apps públicos, pode ou não funcionar
+                'x-api-platform': 'edusp',
+                'x-api-realm': 'prod',
+                'Origin': 'https://saladofuturo.educacao.sp.gov.br',
+                'Referer': 'https://saladofuturo.educacao.sp.gov.br/',
+            }
+        });
+        res.status(200).json(response.data);
+    } catch (error) {
+        console.error("Erro ao buscar tarefas (Cloudflare?):", error.message);
+        res.status(error.response?.status || 500).json({
+            error: 'Falha ao buscar tarefas. O servidor pode estar bloqueando nosso acesso.',
+            details: error.response?.data
+        });
+    }
+});
+
+
+// =================================================================
+// FRONTEND - A interface bonita que o usuário vê
+// =================================================================
+app.get('/', (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="pt-BR">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>bests.IA</title>
+      <script src="https://cdn.tailwindcss.com"></script>
+      <style>
+        body { font-family: 'Inter', sans-serif; background-color: #111827; }
+        .menu-item.active { background-color: #0e7490; color: white; }
+        .content-card {
+            background-color: #1f2937;
+            border-left: 4px solid;
+            transition: all 0.3s ease;
+        }
+        .content-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.2), 0 4px 6px -2px rgba(0, 0, 0, 0.1);
+        }
+        .fade-in {
+            animation: fadeIn 0.5s ease-in-out;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+      </style>
+    </head>
+    <body class="text-gray-200">
+
+      <!-- TELA DE LOGIN -->
+      <div id="loginScreen" class="flex items-center justify-center min-h-screen w-full">
+        <div class="w-full max-w-md bg-gray-800 p-8 rounded-2xl shadow-2xl">
+          <h1 class="text-4xl font-bold mb-8 text-center text-cyan-400">bests.IA</h1>
+          <form id="loginForm" class="space-y-6">
+            <div>
+              <label for="ra" class="block text-sm font-medium text-gray-400">RA (sem dígito e SP)</label>
+              <input type="text" id="ra" required class="mt-1 block w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-cyan-500">
+            </div>
+            <div>
+              <label for="senha" class="block text-sm font-medium text-gray-400">Senha</label>
+              <input type="password" id="senha" required class="mt-1 block w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-cyan-500">
+            </div>
+            <button type="submit" id="submitButton" class="w-full flex justify-center py-3 px-4 border border-transparent rounded-lg shadow-sm text-base font-medium text-white bg-cyan-600 hover:bg-cyan-700 transition-all duration-300">
+              Entrar
+            </button>
+          </form>
+        </div>
+      </div>
+
+      <!-- DASHBOARD PRINCIPAL (escondido inicialmente) -->
+      <div id="dashboard" class="hidden md:grid md:grid-cols-[280px_1fr] h-screen w-full">
+        <!-- MENU LATERAL -->
+        <aside class="bg-gray-800 p-6 flex flex-col">
+          <h1 class="text-3xl font-bold mb-10 text-cyan-400">bests.IA</h1>
+          <nav id="menu" class="flex flex-col space-y-3">
+            <button data-content="home" class="menu-item text-left p-3 rounded-lg hover:bg-gray-700 transition-all duration-300 flex items-center gap-3 active">
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>
+              Início
+            </button>
+            <button data-content="turmas" class="menu-item text-left p-3 rounded-lg hover:bg-gray-700 transition-all duration-300 flex items-center gap-3">
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" /></svg>
+              Minhas Turmas
+            </button>
+             <button data-content="tarefas" class="menu-item text-left p-3 rounded-lg hover:bg-gray-700 transition-all duration-300 flex items-center gap-3">
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" /></svg>
+              Tarefas e Redações
+            </button>
+             <button data-content="mensagens" class="menu-item text-left p-3 rounded-lg hover:bg-gray-700 transition-all duration-300 flex items-center gap-3">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" /></svg>
+                Mensagens
+             </button>
+          </nav>
+          <div class="mt-auto">
+            <button id="logoutButton" class="w-full text-left p-3 rounded-lg hover:bg-red-500 transition-all duration-300 flex items-center gap-3">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg>
+                Sair
+            </button>
+          </div>
+        </aside>
+
+        <!-- CONTEÚDO PRINCIPAL -->
+        <main id="mainContent" class="p-8 overflow-y-auto">
+          <!-- O conteúdo de cada seção será inserido aqui pelo JavaScript -->
+        </main>
+      </div>
+
+      <script>
+        // =================================================================
+        // JAVASCRIPT DO FRONTEND
+        // =================================================================
+        
+        // Estado da Aplicação
+        let appState = {
+            token: null,
+            codigoAluno: null,
+            nome: null,
+            turmas: [],
+        };
+
+        // Seletores de Elementos
+        const loginScreen = document.getElementById('loginScreen');
+        const dashboard = document.getElementById('dashboard');
+        const loginForm = document.getElementById('loginForm');
+        const submitButton = document.getElementById('submitButton');
+        const mainContent = document.getElementById('mainContent');
+        const menu = document.getElementById('menu');
+        const logoutButton = document.getElementById('logoutButton');
+
+        // --- LÓGICA DE LOGIN ---
+        loginForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            submitButton.disabled = true;
+            submitButton.textContent = 'Verificando...';
+
+            const ra = document.getElementById('ra').value;
+            const senha = document.getElementById('senha').value;
+
+            try {
+                const response = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ra, senha })
+                });
+                const data = await response.json();
+
+                if (response.ok && data.token && data.DadosUsuario) {
+                    // Salva os dados no estado da aplicação
+                    appState.token = data.token;
+                    appState.codigoAluno = data.DadosUsuario.CD_USUARIO;
+                    appState.nome = data.DadosUsuario.NAME;
+                    
+                    // Inicia o dashboard
+                    initDashboard();
+                } else {
+                    alert('Login falhou. Verifique seu RA e senha.');
+                    submitButton.disabled = false;
+                    submitButton.textContent = 'Entrar';
+                }
+            } catch (error) {
+                alert('Erro de conexão. Tente novamente.');
+                submitButton.disabled = false;
+                submitButton.textContent = 'Entrar';
+            }
+        });
+
+        // --- INICIALIZAÇÃO DO DASHBOARD ---
+        function initDashboard() {
+            loginScreen.classList.add('hidden');
+            dashboard.classList.remove('hidden');
+            dashboard.classList.add('fade-in');
+            renderHome(); // Renderiza a página inicial
+        }
+        
+        // --- NAVEGAÇÃO DO MENU ---
+        menu.addEventListener('click', (e) => {
+            const button = e.target.closest('.menu-item');
+            if (!button) return;
+
+            // Atualiza o estilo do menu
+            document.querySelectorAll('.menu-item').forEach(btn => btn.classList.remove('active'));
+            button.classList.add('active');
+
+            // Renderiza o conteúdo correspondente
+            const content = button.dataset.content;
+            switch(content) {
+                case 'home':
+                    renderHome();
+                    break;
+                case 'turmas':
+                    renderTurmas();
+                    break;
+                case 'tarefas':
+                    renderTarefas();
+                    break;
+                case 'mensagens':
+                    renderMensagens();
+                    break;
+            }
+        });
+
+        // --- FUNÇÕES DE RENDERIZAÇÃO ---
+        function renderHome() {
+            const primeiroNome = appState.nome.split(' ')[0];
+            const nomeFormatado = primeiroNome.charAt(0).toUpperCase() + primeiroNome.slice(1).toLowerCase();
+            mainContent.innerHTML = \`
+                <div class="fade-in">
+                    <h2 class="text-4xl font-bold text-gray-100">Bem-vindo, ${nomeFormatado}!</h2>
+                    <p class="mt-2 text-lg text-gray-400">Selecione uma opção no menu para começar.</p>
+                    <div class="mt-8 grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div class="content-card p-6 rounded-lg border-l-pink-400">
+                            <h3 class="font-bold text-xl">Navegação Rápida</h3>
+                            <p class="text-gray-400 mt-2">Use o menu à esquerda para ver suas turmas, tarefas e mensagens.</p>
+                        </div>
+                        <div class="content-card p-6 rounded-lg border-l-yellow-400">
+                            <h3 class="font-bold text-xl">Status</h3>
+                            <p class="text-gray-400 mt-2">Você está conectado com sucesso!</p>
+                        </div>
+                    </div>
+                </div>
+            \`;
+        }
+
+        async function renderTurmas() {
+            mainContent.innerHTML = '<p>Buscando suas turmas...</p>';
+            try {
+                const response = await fetch('/api/turmas', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        token: appState.token, 
+                        codigoAluno: appState.codigoAluno, 
+                        anoLetivo: new Date().getFullYear() // Pega o ano atual
+                    })
+                });
+                const result = await response.json();
+
+                if (result.isSucess && result.data) {
+                    appState.turmas = result.data; // Salva as turmas para usar depois
+                    let html = '<h2 class="text-3xl font-bold mb-6 fade-in">Minhas Turmas</h2><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">';
+                    result.data.forEach(turma => {
+                        html += \`
+                            <div class="content-card p-5 rounded-lg border-l-blue-400 fade-in">
+                                <h3 class="font-bold text-lg">${turma.nome}</h3>
+                                <p class="text-sm text-gray-400">${turma.escola}</p>
+                                <p class="text-sm text-gray-400 mt-1">${turma.turno}</p>
+                            </div>
+                        \`;
+                    });
+                    html += '</div>';
+                    mainContent.innerHTML = html;
+                } else {
+                    mainContent.innerHTML = '<p class="text-yellow-400">Não foi possível encontrar turmas para este ano. A resposta do servidor foi bem-sucedida, mas não retornou dados.</p>';
+                }
+            } catch (error) {
+                mainContent.innerHTML = '<p class="text-red-400">Ocorreu um erro ao buscar suas turmas.</p>';
+            }
+        }
+        
+        async function renderTarefas() {
+            mainContent.innerHTML = '<p>Tentando buscar tarefas e redações... (Isso pode falhar devido a proteções de segurança)</p>';
+            
+            // Garante que temos as turmas antes de buscar tarefas
+            if(appState.turmas.length === 0) {
+                await renderTurmas(); // Se não tiver turmas, busca primeiro
+                 // Se depois de buscar ainda não tiver, para aqui.
+                if(appState.turmas.length === 0) {
+                    mainContent.innerHTML += '<p class="text-red-400 mt-4">Não foi possível buscar tarefas pois nenhuma turma foi encontrada.</p>';
+                    return;
+                }
+            }
+
+            try {
+                const response = await fetch('/api/tarefas', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ token: appState.token, turmas: appState.turmas })
+                });
+                const result = await response.json();
+
+                if (response.ok && result.items) {
+                     let html = '<h2 class="text-3xl font-bold mb-6 fade-in">Tarefas e Redações</h2><div class="space-y-4">';
+                     result.items.forEach(tarefa => {
+                        const cor = tarefa.is_essay ? 'pink' : 'yellow';
+                        html += \`
+                            <div class="content-card p-5 rounded-lg border-l-${cor}-400 fade-in">
+                                <h3 class="font-bold text-lg">${tarefa.title}</h3>
+                                <p class="text-sm text-gray-400">${tarefa.discipline_name}</p>
+                                <p class="text-xs text-gray-500 mt-2">Prazo: ${new Date(tarefa.deadline).toLocaleDateString('pt-BR')}</p>
+                            </div>
+                        \`;
+                    });
+                    html += '</div>';
+                    mainContent.innerHTML = html;
+                } else {
+                     mainContent.innerHTML = \`
+                        <h2 class="text-3xl font-bold mb-6 fade-in text-red-400">Acesso Bloqueado</h2>
+                        <p>Como esperado, o "guarda de segurança" (Cloudflare) do servidor de tarefas bloqueou nosso acesso.</p>
+                        <p class="mt-2">Não conseguimos buscar as tarefas e redações por este método. As outras seções, como "Minhas Turmas", devem funcionar normalmente.</p>
+                        <pre class="mt-4 text-xs bg-gray-900 p-4 rounded-md">${JSON.stringify(result, null, 2)}</pre>
+                     \`;
+                }
+
+            } catch(error) {
+                 mainContent.innerHTML = '<p class="text-red-400">Ocorreu um erro grave ao tentar buscar as tarefas.</p>';
+            }
+        }
+
+        function renderMensagens() {
+            mainContent.innerHTML = \`
+                <div class="fade-in">
+                    <h2 class="text-3xl font-bold mb-6">Mensagens</h2>
+                    <div class="content-card p-6 rounded-lg border-l-cyan-400">
+                        <h3 class="font-bold text-xl">Em Desenvolvimento</h3>
+                        <p class="text-gray-400 mt-2">A API de mensagens também é protegida pelo Cloudflare e não pudemos acessá-la ainda. Esta funcionalidade será adicionada no futuro!</p>
+                    </div>
+                </div>
+            \`;
+        }
+        
+        // --- LOGOUT ---
+        logoutButton.addEventListener('click', () => {
+            // Limpa o estado e recarrega a página
+            appState = { token: null, codigoAluno: null, nome: null, turmas: [] };
+            location.reload();
+        });
+
+      </script>
+    </body>
+    </html>
+  `);
+});
+
+// Iniciar o servidor
+app.listen(PORT, () => {
+  console.log(\`Servidor bests.IA rodando em http://localhost:\${PORT}\`);
+});
+
